@@ -18,9 +18,9 @@ and drives the Skylanders Portal's RGB light in real time.
   - Payload: `[0x0B, 0x14, 0x43, r, g, b]`
 
 ## Phase 2 - Audio Capture
-- [ ] Set up a `cpal` input stream at 44100 Hz, mono, i16
-- [ ] Feed samples into a shared buffer (Mutex<VecDeque<i16>>)
-- [ ] Consume 1024-sample frames from the main loop
+- [x] Set up a `cpal` input stream at 44100 Hz, mono, i16
+- [x] Feed samples into a shared buffer (Mutex<VecDeque<i16>>)
+- [x] Consume 1024-sample frames from the main loop
 
 ## Phase 3 - FFT & Analysis
 - [ ] Run `rustfft` rFFT on each 1024-sample frame
