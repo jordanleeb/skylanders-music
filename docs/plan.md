@@ -11,10 +11,10 @@ and drives the Skylanders Portal's RGB light in real time.
 
 ## Phase 1 - USB Communication
 - [x] Project created, pushed to GitHub
-- [ ] Find the Portal by vendor ID (0x1430) using `rusb::devices()`
-- [ ] Open the device handle and detach kernel driver on interface 0
-- [ ] Claim interface 0
-- [ ] Send a test RGB color via bulk write to endpoint 0x02
+- [x] Find the Portal by vendor ID (0x1430) using `rusb::devices()`
+- [x] Open the device handle and detach kernel driver on interface 0
+- [x] Claim interface 0
+- [x] Send a test RGB color via bulk write to endpoint 0x02
   - Payload: `[0x0B, 0x14, 0x43, r, g, b]`
 
 ## Phase 2 - Audio Capture
