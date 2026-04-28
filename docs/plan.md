@@ -23,14 +23,14 @@ and drives the Skylanders Portal's RGB light in real time.
 - [x] Consume 1024-sample frames from the main loop
 
 ## Phase 3 - FFT & Analysis
-- [ ] Run `rustfft` rFFT on each 1024-sample frame
-- [ ] Extract amplitudes from the complex output
-- [ ] Track rolling max amplitude for normalization
-- [ ] Compute mean frequency (weighted dot product) and mean brightness
-- [ ] Apply exponential smoothing (factor ~0.2)
+- [x] Run `rustfft` rFFT on each 1024-sample frame
+- [x] Extract amplitudes from the complex output
+- [x] Track rolling max amplitude for normalization
+- [x] Compute mean frequency (weighted dot product) and mean brightness
+- [x] Apply exponential smoothing (factor ~0.2)
 
 ## Phase 4 - Color Mapping
-- [ ] Build RGB gradient: red -> green -> blue -> red (19200 steps total)
-- [ ] Map mean frequency to gradient index
-- [ ] Scale color channels by brightness
-- [ ] Send final color to Portal each frame
+- [x] Build RGB gradient: red -> green -> blue -> red (19200 steps total)
+- [x] Map mean frequency to gradient index
+- [x] Scale color channels by brightness
+- [x] Send final color to Portal each frame

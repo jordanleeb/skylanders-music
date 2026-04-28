@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 rusb = "0.9"
 cpal = "0.15"
+rustfft = "6"
