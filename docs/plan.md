@@ -2,7 +2,8 @@
 
 ## Project Goal
 A Rust program that reads live microphone audio, analyzes it via FFT,
-and drives the Skylanders Portal's RGB light in real time.
+and drives one or more Skylanders Portal RGB lights in real time,
+with each portal reacting to its own slice of the frequency spectrum.
 
 ## Tech Stack
 - `rusb` : USB communication with the Portal
@@ -34,3 +35,16 @@ and drives the Skylanders Portal's RGB light in real time.
 - [x] Map mean frequency to gradient index
 - [x] Scale color channels by brightness
 - [x] Send final color to Portal each frame
+
+## Phase 5 - Multi-Portal Support
+- [x] Collect all portals matching vendor ID 0x1430 (filter instead of find)
+- [x] Assert at least 1 portal is connected at startup; print the count found
+- [x] Open, detach, and claim each portal handle in a loop
+- [x] Introduce `PortalState` struct to track independent smoothing state per portal
+  - Fields: `mean_brightness`, `mean_frequency`, `max_amplitude`
+- [x] Add `make_freq_ranges(n)` to divide `FREQ_LOWER..FREQ_UPPER` into n
+      contiguous bands; the final band absorbs any remainder so no bins are dropped
+- [x] Run one FFT per frame, then iterate portals to compute and send each color
+  - 1 portal: full frequency range, behavior identical to Phase 4
+  - 2 portals: low half and high half
+  - N portals: spectrum divided into N roughly equal bands
