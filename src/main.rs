@@ -2,6 +2,7 @@ use rusb::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
+use std::thread;
 use rustfft::{FftPlanner, num_complex::Complex};
 
 // Skylanders Portal USB vendor ID.
@@ -29,6 +30,23 @@ const BRIGHTNESS_MULTIPLIER: f32 = 1.0;
 
 // Number of steps per gradient segment.
 const GRADIENT_STEPS: usize = 6400;
+
+// How long to sleep when the buffer does not yet hold a full frame.
+// ~1ms keeps CPU usage low while still reacting within two frame-lengths
+// at 44100 Hz (FRAME_SIZE / 44100 ≈ 23 ms per frame).
+const BUFFER_POLL_SLEEP_US: u64 = 1_000;
+
+// Fractional decay applied to max_amplitude each frame when the current signal
+// is below the tracked peak.  A value of 0.995 lets the ceiling fall ~30% over
+// ~200 frames (~5 seconds), keeping normalization tight after loud transients
+// without causing visible flicker.  Raise toward 1.0 for a slower release;
+// lower toward 0.99 for a faster one.
+const MAX_AMPLITUDE_DECAY: f32 = 0.995;
+
+// Absolute floor for max_amplitude.  Prevents the ceiling from decaying to zero
+// during silence, which would produce a divide-by-zero and make noise-floor
+// artefacts appear full-brightness.
+const MAX_AMPLITUDE_FLOOR: f32 = 1.0;
 
 // Per-portal smoothing state, kept independent so each reacts to its own frequency band.
 struct PortalState {
@@ -156,6 +174,10 @@ fn main() {
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(FRAME_SIZE);
 
+    // Pre-allocate the FFT scratch buffer once and reuse it every frame,
+    // avoiding a heap allocation inside fft.process() on each iteration.
+    let mut scratch = vec![Complex { re: 0.0f32, im: 0.0f32 }; fft.get_inplace_scratch_len()];
+
     // Build a looping RGB gradient: red to green, green to blue, blue to red.
     let mut colors: Vec<[f32; 3]> = Vec::new();
     colors.extend(make_gradient([255.0, 0.0, 0.0], [0.0, 254.0, 0.0], GRADIENT_STEPS));
@@ -168,53 +190,75 @@ fn main() {
     // Divide the frequency range evenly across however many portals are connected.
     let freq_ranges = make_freq_ranges(handles.len());
 
+    // Pre-allocate the FFT input buffer and a scratch amplitudes buffer to avoid
+    // per-frame heap allocations inside the hot loop.
+    let mut fft_input: Vec<Complex<f32>> = vec![Complex { re: 0.0, im: 0.0 }; FRAME_SIZE];
+    let mut amplitudes: Vec<f32> = vec![0.0f32; FREQ_UPPER - FREQ_LOWER];
+
     loop {
         // Wait until enough samples are available in the buffer.
-        let frame: Vec<i16> = {
+        // Sleep briefly instead of busy-spinning to avoid starving the audio callback
+        // and wasting CPU cycles on mutex contention.
+        let frame: Vec<i16> = loop {
             let mut buf = buffer.lock().unwrap();
-            if buf.len() < FRAME_SIZE {
-                continue;
+            if buf.len() >= FRAME_SIZE {
+                break buf.drain(..FRAME_SIZE).collect();
             }
-            buf.drain(..FRAME_SIZE).collect()
+            // Drop the lock before sleeping so the audio callback is not blocked.
+            drop(buf);
+            thread::sleep(std::time::Duration::from_micros(BUFFER_POLL_SLEEP_US));
         };
 
-        // Convert samples to complex numbers for FFT input.
-        let mut fft_input: Vec<Complex<f32>> = frame.iter()
-            .map(|s| Complex { re: *s as f32, im: 0.0 })
-            .collect();
+        // Convert samples into the pre-allocated FFT buffer in place,
+        // avoiding a Vec allocation on every frame.
+        for (dst, src) in fft_input.iter_mut().zip(frame.iter()) {
+            dst.re = *src as f32;
+            dst.im = 0.0;
+        }
 
-        // Run the FFT in place.
-        fft.process(&mut fft_input);
+        // Run the FFT in place, reusing the pre-allocated scratch buffer.
+        fft.process_with_scratch(&mut fft_input, &mut scratch);
 
-        // Update each portal using its assigned frequency band.
+        // Build per-portal color payloads so we can dispatch all USB writes in
+        // parallel threads, preventing each portal's write_bulk timeout from
+        // stacking additively and introducing N×timeout lag.
+        let mut payloads: Vec<[u8; 6]> = Vec::with_capacity(handles.len());
+
         for (i, (freq_start, freq_end)) in freq_ranges.iter().enumerate() {
             let amp_length = freq_end - freq_start;
             let state = &mut states[i];
 
-            // Extract amplitudes from this portal's frequency band.
-            let amplitudes: Vec<f32> = fft_input[*freq_start..*freq_end]
-                .iter()
-                .map(|c| c.norm())
-                .collect();
+            // Compute amplitudes into the pre-allocated slice for this band,
+            // avoiding an allocation per portal per frame.
+            let amp_slice = &mut amplitudes[..*freq_end - *freq_start];
+            for (j, c) in fft_input[*freq_start..*freq_end].iter().enumerate() {
+                amp_slice[j] = c.norm();
+            }
 
-            let current_max = amplitudes.iter().cloned().fold(0.0f32, f32::max);
+            let current_max = amp_slice.iter().cloned().fold(0.0f32, f32::max);
 
             if current_max > 0.0 {
-                // Track the rolling maximum amplitude for normalization.
+                // Decay the amplitude ceiling each frame so it tracks the signal
+                // dynamically.  When a loud transient passes, the ceiling drifts
+                // back down toward the current level, restoring full brightness
+                // range rather than permanently dimming after a peak.  A floor of
+                // MAX_AMPLITUDE_FLOOR prevents the ceiling from collapsing to zero
+                // during silence, which would amplify noise-floor artefacts.
+                state.max_amplitude = (state.max_amplitude * MAX_AMPLITUDE_DECAY)
+                    .max(MAX_AMPLITUDE_FLOOR);
+
+                // Grow the ceiling instantly on any new peak so normalization
+                // never clips above 1.0.
                 if current_max > state.max_amplitude {
                     state.max_amplitude = current_max;
                 }
-
-                let normalized: Vec<f32> = amplitudes.iter()
-                    .map(|a| a / state.max_amplitude)
-                    .collect();
 
                 // Smooth brightness toward the current normalized peak.
                 state.mean_brightness -= (state.mean_brightness - (current_max / state.max_amplitude)) * SMOOTHNESS;
 
                 // Compute the amplitude-weighted mean frequency bin within this band and smooth it.
                 let weighted_freq: f32 = (0..amp_length)
-                    .map(|j| j as f32 * normalized[j])
+                    .map(|j| j as f32 * (amp_slice[j] / state.max_amplitude))
                     .sum::<f32>() % amp_length as f32;
 
                 state.mean_frequency -= (state.mean_frequency - weighted_freq) * SMOOTHNESS;
@@ -233,10 +277,20 @@ fn main() {
             let g = (color[1] * state.mean_brightness * BRIGHTNESS_MULTIPLIER).min(255.0).round() as u8;
             let b = (color[2] * state.mean_brightness * BRIGHTNESS_MULTIPLIER).min(255.0).round() as u8;
 
-            // Send the color to this portal.
-            let payload = [COLOR_COMMAND[0], COLOR_COMMAND[1], COLOR_COMMAND[2], r, g, b];
-            handles[i].write_bulk(PORTAL_ENDPOINT, &payload, std::time::Duration::from_millis(10))
-                .expect("Failed to write color.");
+            payloads.push([COLOR_COMMAND[0], COLOR_COMMAND[1], COLOR_COMMAND[2], r, g, b]);
         }
+
+        // Send all portal color commands in parallel.
+        // Each write_bulk call can block up to its timeout; doing them concurrently
+        // keeps total write time bounded by the slowest single portal rather than
+        // the sum of all portal timeouts.
+        thread::scope(|s| {
+            for (handle, payload) in handles.iter().zip(payloads.iter()) {
+                s.spawn(|| {
+                    handle.write_bulk(PORTAL_ENDPOINT, payload, std::time::Duration::from_millis(10))
+                        .expect("Failed to write color.");
+                });
+            }
+        });
     }
 }

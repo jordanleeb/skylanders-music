@@ -48,3 +48,27 @@ with each portal reacting to its own slice of the frequency spectrum.
   - 1 portal: full frequency range, behavior identical to Phase 4
   - 2 portals: low half and high half
   - N portals: spectrum divided into N roughly equal bands
+
+## Phase 6 - Performance Optimizations
+- [x] Replace busy-spin buffer poll with a `thread::sleep` yield
+  - Main loop no longer spins at 100% CPU while waiting for samples
+  - Sleep duration: 1 ms (`BUFFER_POLL_SLEEP_US`); well within one frame (~23 ms at 44100 Hz)
+  - Mutex is explicitly dropped before sleeping so the audio callback thread
+    is never blocked waiting for the main loop to release it
+- [x] Pre-allocate FFT scratch buffer via `fft.get_inplace_scratch_len()` + `process_with_scratch`
+  - Eliminates the internal heap allocation that `fft.process()` performed on every frame
+- [x] Pre-allocate `fft_input` buffer (Vec<Complex<f32>>, FRAME_SIZE) outside the hot loop
+  - Samples are written in-place each frame; no Vec created per iteration
+- [x] Pre-allocate `amplitudes` scratch buffer (Vec<f32>, FREQ_UPPER - FREQ_LOWER) outside the hot loop
+  - Amplitude values are written per-band into a slice of this buffer; no per-portal allocation
+- [x] Parallel USB writes via `thread::scope`
+  - All portal `write_bulk` calls are dispatched concurrently in scoped threads
+  - Total write latency is bounded by the slowest single portal, not the sum of all timeouts
+  - With N portals and a 10 ms timeout, worst-case write latency goes from N×10 ms to 10 ms
+- [x] Dynamic max amplitude ceiling (`MAX_AMPLITUDE_DECAY`, `MAX_AMPLITUDE_FLOOR`)
+  - `max_amplitude` previously only grew, permanently dimming portals after loud transients
+  - Each frame the ceiling is multiplied by `MAX_AMPLITUDE_DECAY` (0.995) before comparing
+    against `current_max`, so it drifts back down toward the live signal level over time
+  - The ceiling still grows instantly on any new peak, so normalization never clips above 1.0
+  - `MAX_AMPLITUDE_FLOOR` (1.0) prevents the ceiling from decaying to zero during silence,
+    which would otherwise amplify noise-floor artefacts to full brightness
